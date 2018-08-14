@@ -20,7 +20,7 @@ end
 
 name = "GCC"
 tag_name = BinaryBuilder.get_tag_name()
-bin_path = "https://github.com/staticfloat/GCCBuilder/releases/download/$(tag)"
+bin_path = "https://github.com/staticfloat/GCCBuilder/releases/download/$(tag_name)"
 products = [ExecutableProduct(Prefix("."), "gcc", :gcc)]
 for version in keys(version_dict)
     print_buildjl(pwd(), name, version, products, version_dict[version], bin_path)
