@@ -122,18 +122,19 @@ if occursin("-gnu", compiler_target)
     compiler_target_arch = arch(platform_key(compiler_target))
     glibc_version = glibc_arch_version[compiler_target_arch]
 
-    script_url = "https://github.com/staticfloat/GlibcBuilder/releases/download/v2.27-3/build_Glibc.v$(glibc_version).jl"
-    push!(dependencies, script_url)
+    push!(dependencies, "https://github.com/staticfloat/GlibcBuilder/releases/download/v2.27-3/build_Glibc.v$(glibc_version).jl")
+end
+
+if occursin("-musl", compiler_target)
+    push!(dependencies, "https://github.com/staticfloat/MuslBuilder/releases/download/v1.1.19-0/build_Musl.v1.1.19.jl")
 end
 
 if occursin("-mingw", compiler_target)
-    script_url = "https://github.com/staticfloat/MingwBuilder/releases/download/v5.0.4-1/build_Mingw32.v5.0.4.jl"
-    push!(dependencies, script_url)
+    push!(dependencies, "https://github.com/staticfloat/MingwBuilder/releases/download/v5.0.4-2/build_Mingw32.v5.0.4.jl")
 end
 
 if occursin("-freebsd", compiler_target)
-    script_url = "https://github.com/staticfloat/FreeBSDLibcBuilder/releases/download/v11.1-0/build_FreeBSDLibc.v11.1.0.jl"
-    push!(dependencies, script_url)
+    push!(dependencies, "https://github.com/staticfloat/FreeBSDLibcBuilder/releases/download/v11.1-0/build_FreeBSDLibc.v11.1.0.jl")
 end
 
 # Bash recipe for building across all platforms
@@ -153,9 +154,10 @@ update_configure_scripts
 
 # Apply patch for OSX linker crash problems
 patch -p1 < \${WORKSPACE}/srcdir/patches/gcc810_linker_madness_on_osx.patch || true
-#patch -p1 < \${WORKSPACE}/srcdir/patches/gcc493_libc_name_p.patch || true
-patch -p1 <  \${WORKSPACE}/srcdir/patches/gcc610_ubsan_pointer.patch || true
- 
+patch -p1 < \${WORKSPACE}/srcdir/patches/gcc610_ubsan_pointer.patch || true
+
+# Apply patch for musl support on older (4.9.4) GCC versions
+patch -p1 < \${WORKSPACE}/srcdir/patches/gcc494_musl.patch || true
 
 # Redirect compiler variables
 export MACHTYPE=x86_64-linux-gnu
@@ -168,6 +170,9 @@ export FC=\$HOSTFC
 
 # Choose compiler target
 COMPILER_TARGET="$(compiler_target)"
+
+# Default sysroot for all platforms (except OSX.  sigh.)
+sysroot="\${prefix}/\${COMPILER_TARGET}/sys-root"
 
 # Build up optional configuration args
 GCC_CONF_ARGS=""
@@ -189,27 +194,22 @@ if [[ "\$COMPILER_TARGET" == *apple* ]]; then
     GCC_CONF_ARGS="\${GCC_CONF_ARGS} --with-as=\${AS}"
 	GCC_CONF_ARGS="\${GCC_CONF_ARGS} --enable-languages=c,c++,fortran,objc,obj-c++"
 
-    sysroot="/opt/x86_64-apple-darwin14/MacOSX10.10.sdk"
-
 # On Linux, we just enable C/C++/Fortran    
 elif [[ "\${COMPILER_TARGET}" == *linux* ]]; then
 	GCC_CONF_ARGS="\${GCC_CONF_ARGS} --enable-languages=c,c++,fortran"
-    sysroot="\${prefix}/\${COMPILER_TARGET}/sys-root"
 
 # FreeBSD has weird PIE problems.  We can also only build gfortran for now, no GCC :(
 elif [[ "\${COMPILER_TARGET}" == *freebsd* ]]; then
     GCC_CONF_ARGS="\${GCC_CONF_ARGS} --enable-languages=fortran"
 	GCC_CONF_ARGS="\${GCC_CONF_ARGS} --disable-default-pie"
     
-    # Symlink necessary sys-include directory
-    ln -s sys-root/include \${prefix}/\${COMPILER_TARGET}/sys-include
-    sysroot="\${prefix}/\${COMPILER_TARGET}/sys-root"
-
 # On mingw32 override native system header directories    
 elif [[ "\${COMPILER_TARGET}" == *mingw* ]]; then
 	GCC_CONF_ARGS="\${GCC_CONF_ARGS} --enable-languages=c,c++,fortran"
-    GCC_CONF_ARGS="\${GCC_CONF_ARGS} --with-native-system-header-dir=/usr/include"
-    sysroot="\${prefix}/\${COMPILER_TARGET}/sys-root"
+    GCC_CONF_ARGS="\${GCC_CONF_ARGS} --with-native-system-header-dir=/include"
+
+    # We also need to symlink our lib directory specially
+    ln -s sys-root/lib \${prefix}/\${COMPILER_TARGET}/lib
 fi
 
 
@@ -236,15 +236,11 @@ fi
 # On many platforms (Glibc, mingw32, etc...) we need to symlink sys-include
 if [[ -d \${prefix}/\${COMPILER_TARGET}/sys-root/include ]]; then
     ln -s sys-root/include \${prefix}/\${COMPILER_TARGET}/sys-include
-elif [[ -d \${prefix}/\${COMPILER_TARGET}/sys-root/usr/include ]]; then
-    ln -s sys-root/usr/include \${prefix}/\${COMPILER_TARGET}/sys-include
-    ln -s sys-root/usr/lib \${prefix}/\${COMPILER_TARGET}/lib
 fi
 
 # GCC won't build (crti.o: no such file or directory) unless these directories exist.
 # They can be empty though.
 mkdir -p \${prefix}/\${COMPILER_TARGET}/sys-root/{lib,usr/lib}
-
 
 # Build in a separate directory
 mkdir -p \$WORKSPACE/srcdir/gcc_build
@@ -264,17 +260,12 @@ cd \$WORKSPACE/srcdir/gcc_build
     --with-sysroot="\${sysroot}" \\
 	\${GCC_CONF_ARGS}
 
-    #LD=/opt/super_binutils/bin/
-
 # Build, build, build!
 make -j \$((\${nproc}+1))
 make install
 
 # Cleanup our manually made symlink from above
 rm -f \${prefix}/\${COMPILER_TARGET}/sys-include
-
-# Because this always writes out .texi files, we have to chown them back to ourselves
-#chown \$(id -u):\$(id -g) -R .
 
 # This is needed for any glibc older than 2.14, which includes the following commit
 # https://sourceware.org/git/?p=glibc.git;a=commit;h=95f5a9a866695da4e038aa4e6ccbbfd5d9cf63b7
